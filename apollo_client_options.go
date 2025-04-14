@@ -31,3 +31,9 @@ func WithSignatureFunc(sf SignatureFunc) ApolloClientOption {
 		a.SignatureFunc = sf
 	}
 }
+
+func WithSecretKey(secretKey string) ApolloClientOption {
+	return func(a *apolloClient) {
+		a.SecretKey = secretKey
+	}
+}

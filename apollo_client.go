@@ -1,9 +1,14 @@
 package agollo
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +24,10 @@ const (
 	// ENV_APOLLO_ACCESS_KEY 默认从环境变量中读取Apollo的AccessKey
 	// 会被显示传入的AccessKey所覆盖
 	ENV_APOLLO_ACCESS_KEY = "APOLLO_ACCESS_KEY"
+
+	// ENV_APOLLO_SECRET_KEY 默认从环境变量中读取Apollo的SecretKey，必须是base64格式
+	// 会被显示传入的SecretKey所覆盖
+	ENV_APOLLO_SECRET_KEY = "APOLLO_SECRET_KEY"
 )
 
 type Doer interface {
@@ -30,6 +39,7 @@ type apolloClient struct {
 	IP            string
 	ConfigType    string // 默认properties不需要在namespace后加后缀名，其他情况例如application.json {xml,yml,yaml,json,...}
 	AccessKey     string
+	SecretKey     string
 	SignatureFunc SignatureFunc
 }
 
@@ -41,6 +51,7 @@ func NewApolloClient(opts ...ApolloClientOption) ApolloClient {
 			Timeout: defaultClientTimeout, // Notifications由于服务端会hold住请求60秒，所以请确保客户端访问服务端的超时时间要大于60秒。
 		},
 		AccessKey:     os.Getenv(ENV_APOLLO_ACCESS_KEY),
+		SecretKey:     os.Getenv(ENV_APOLLO_SECRET_KEY),
 		SignatureFunc: DefaultSignatureFunc,
 	}
 
@@ -102,7 +113,7 @@ func (c *apolloClient) GetConfigsFromNonCache(configServerURL, appID, cluster, n
 		Cluster:         cluster,
 	})
 	config = new(Config)
-	status, err = c.do("GET", apiURL, headers, config)
+	status, err = c.Get(apiURL, headers, config)
 	return
 
 }
@@ -169,6 +180,67 @@ func (c *apolloClient) do(method, url string, headers map[string]string, v inter
 	return
 }
 
+// Get namespace config from apollo, decrypt if env APOLLO_SECRET_KEY is set, Only support RSA
+func (c *apolloClient) Get(url string, headers map[string]string, v interface{}) (int, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	for key, val := range headers {
+		req.Header.Set(key, val)
+	}
+
+	status, body, err := parseResponseBody(c.Doer, req)
+	if err != nil {
+		return 0, err
+	}
+
+	if status == http.StatusOK {
+		if len(c.SecretKey) > 0 {
+			raw, err := base64.RawStdEncoding.DecodeString(c.SecretKey)
+			if err != nil {
+				return status, err
+			}
+
+			sk, err := x509.ParsePKCS8PrivateKey(raw)
+			if err != nil {
+				return status, err
+			}
+
+			privKey := sk.(*rsa.PrivateKey)
+			partLen := privKey.PublicKey.N.BitLen() / 8
+			chunks := split(body, partLen)
+			buffer := bytes.NewBufferString("")
+			for _, chunk := range chunks {
+				decrypted, err := rsa.DecryptPKCS1v15(rand.Reader, privKey, chunk)
+				if err != nil {
+					return status, err
+				}
+				buffer.Write(decrypted)
+			}
+
+			err = json.Unmarshal(buffer.Bytes(), v)
+		} else {
+			err = json.Unmarshal(body, v)
+		}
+	}
+	return status, nil
+}
+
+func split(buf []byte, lim int) [][]byte {
+	var chunk []byte
+	chunks := make([][]byte, 0, len(buf)/lim+1)
+	for len(buf) >= lim {
+		chunk, buf = buf[:lim], buf[lim:]
+		chunks = append(chunks, chunk)
+	}
+	if len(buf) > 0 {
+		chunks = append(chunks, buf[:])
+	}
+	return chunks
+}
+
 // 配置文件有多种格式，例如：properties、xml、yml、yaml、json等。同样Namespace也具有这些格式。在Portal UI中可以看到“application”的Namespace上有一个“properties”标签，表明“application”是properties格式的。
 // 如果使用Http接口直接调用时，对应的namespace参数需要传入namespace的名字加上后缀名，如datasources.json。
 func (c *apolloClient) getNamespace(namespace string) string {
@@ -202,7 +274,7 @@ func parseResponseBody(doer Doer, req *http.Request) (int, []byte, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, nil, err
 	}
