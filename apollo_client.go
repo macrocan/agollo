@@ -28,6 +28,9 @@ const (
 	// ENV_APOLLO_SECRET_KEY 默认从环境变量中读取Apollo的SecretKey，必须是base64格式
 	// 会被显示传入的SecretKey所覆盖
 	ENV_APOLLO_SECRET_KEY = "APOLLO_SECRET_KEY"
+
+	// ENV_HEADER_ENCRYPT_FLAG 默认从环境变量读取，根据header附带的标志判断body是否加密
+	ENV_HEADER_ENCRYPT_FLAG = "HEADER_ENCRYPT_FLAG"
 )
 
 type Doer interface {
@@ -40,6 +43,7 @@ type apolloClient struct {
 	ConfigType    string // 默认properties不需要在namespace后加后缀名，其他情况例如application.json {xml,yml,yaml,json,...}
 	AccessKey     string
 	SecretKey     string
+	EncryptFlag   string
 	SignatureFunc SignatureFunc
 }
 
@@ -52,6 +56,7 @@ func NewApolloClient(opts ...ApolloClientOption) ApolloClient {
 		},
 		AccessKey:     os.Getenv(ENV_APOLLO_ACCESS_KEY),
 		SecretKey:     os.Getenv(ENV_APOLLO_SECRET_KEY),
+		EncryptFlag:   os.Getenv(ENV_HEADER_ENCRYPT_FLAG),
 		SignatureFunc: DefaultSignatureFunc,
 	}
 
@@ -113,7 +118,7 @@ func (c *apolloClient) GetConfigsFromNonCache(configServerURL, appID, cluster, n
 		Cluster:         cluster,
 	})
 	config = new(Config)
-	status, err = c.Get(apiURL, headers, config)
+	status, err = c.do("GET", apiURL, headers, config)
 	return
 
 }
@@ -169,7 +174,7 @@ func (c *apolloClient) do(method, url string, headers map[string]string, v inter
 	}
 
 	var body []byte
-	status, body, err = parseResponseBody(c.Doer, req)
+	status, body, err = c.parseResponseBody(c.Doer, req)
 	if err != nil {
 		return
 	}
@@ -178,54 +183,6 @@ func (c *apolloClient) do(method, url string, headers map[string]string, v inter
 		err = json.Unmarshal(body, v)
 	}
 	return
-}
-
-// Get namespace config from apollo, decrypt if env APOLLO_SECRET_KEY is set, Only support RSA
-func (c *apolloClient) Get(url string, headers map[string]string, v interface{}) (int, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	for key, val := range headers {
-		req.Header.Set(key, val)
-	}
-
-	status, body, err := parseResponseBody(c.Doer, req)
-	if err != nil {
-		return 0, err
-	}
-
-	if status == http.StatusOK {
-		if len(c.SecretKey) > 0 {
-			raw, err := base64.RawStdEncoding.DecodeString(c.SecretKey)
-			if err != nil {
-				return status, err
-			}
-
-			sk, err := x509.ParsePKCS8PrivateKey(raw)
-			if err != nil {
-				return status, err
-			}
-
-			privKey := sk.(*rsa.PrivateKey)
-			partLen := privKey.PublicKey.N.BitLen() / 8
-			chunks := split(body, partLen)
-			buffer := bytes.NewBufferString("")
-			for _, chunk := range chunks {
-				decrypted, err := rsa.DecryptPKCS1v15(rand.Reader, privKey, chunk)
-				if err != nil {
-					return status, err
-				}
-				buffer.Write(decrypted)
-			}
-
-			err = json.Unmarshal(buffer.Bytes(), v)
-		} else {
-			err = json.Unmarshal(body, v)
-		}
-	}
-	return status, nil
 }
 
 func split(buf []byte, lim int) [][]byte {
@@ -267,7 +224,7 @@ func getLocalIP() string {
 	return ""
 }
 
-func parseResponseBody(doer Doer, req *http.Request) (int, []byte, error) {
+func (c *apolloClient) parseResponseBody(doer Doer, req *http.Request) (int, []byte, error) {
 	resp, err := doer.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -277,6 +234,32 @@ func parseResponseBody(doer Doer, req *http.Request) (int, []byte, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return 0, nil, err
+	}
+
+	// if encrypted, decrypt
+	if resp.Header.Get(c.EncryptFlag) == "true" {
+		raw, err := base64.RawStdEncoding.DecodeString(c.SecretKey)
+		if err != nil {
+			return 0, nil, err
+		}
+
+		sk, err := x509.ParsePKCS8PrivateKey(raw)
+		if err != nil {
+			return 0, nil, err
+		}
+
+		privKey := sk.(*rsa.PrivateKey)
+		partLen := privKey.PublicKey.N.BitLen() / 8
+		chunks := split(body, partLen)
+		buffer := bytes.NewBufferString("")
+		for _, chunk := range chunks {
+			decrypted, err := rsa.DecryptPKCS1v15(rand.Reader, privKey, chunk)
+			if err != nil {
+				return 0, nil, err
+			}
+			buffer.Write(decrypted)
+		}
+		return resp.StatusCode, buffer.Bytes(), nil
 	}
 
 	return resp.StatusCode, body, nil
