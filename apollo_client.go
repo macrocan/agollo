@@ -29,8 +29,8 @@ const (
 	// 会被显示传入的SecretKey所覆盖
 	ENV_APOLLO_SECRET_KEY = "APOLLO_SECRET_KEY"
 
-	// ENV_HEADER_ENCRYPT_FLAG 默认从环境变量读取，根据header附带的标志判断body是否加密
-	ENV_HEADER_ENCRYPT_FLAG = "HEADER_ENCRYPT_FLAG"
+	// ENV_APOLLO_ENCRYPT_CONFIG 默认从环境变量读取，根据header附带的标志判断body是否加密
+	ENV_APOLLO_ENCRYPT_CONFIG = "APOLLO_ENCRYPT_CONFIG"
 )
 
 type Doer interface {
@@ -56,7 +56,7 @@ func NewApolloClient(opts ...ApolloClientOption) ApolloClient {
 		},
 		AccessKey:     os.Getenv(ENV_APOLLO_ACCESS_KEY),
 		SecretKey:     os.Getenv(ENV_APOLLO_SECRET_KEY),
-		EncryptFlag:   os.Getenv(ENV_HEADER_ENCRYPT_FLAG),
+		EncryptFlag:   os.Getenv(ENV_APOLLO_ENCRYPT_CONFIG),
 		SignatureFunc: DefaultSignatureFunc,
 	}
 
